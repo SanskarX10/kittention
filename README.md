@@ -21,10 +21,17 @@ The is just a fun side project.
 
 Implementation status:
 
-- [x] Sparse Attention  
-- [ ] Multi-Head Latent Attention  
-- [ ] Linear Attention  
-- [x] Self Attention (baseline)  
-- [x] Grouped Query Attention
+## Attention Types
+
+| Attention Mechanism | Paper | Status |
+|--------------------|-------|--------|
+| Self Attention (Baseline) | https://arxiv.org/abs/1706.03762 | ✅ |
+| Sparse Attention | https://arxiv.org/abs/1904.10509 | ✅ |
+| Grouped Query Attention | https://arxiv.org/abs/2305.13245 | ✅ |
+| Linear Attention | (tba) | ⏳ |
+| Multi-Head Latent Attention | https://arxiv.org/abs/2405.04434 | ⏳ |
+| Sparse Sinkhorn Attention | https://arxiv.org/pdf/2002.11296 | ⏳ |
+
+
 
 ---
