@@ -1,7 +1,7 @@
 # kittention
 kittention: the attention archive
 
-![Kittention Banner](./images/kittention.png)
+![Kittention Banner](./kittention.png)
 
 ## Overview
 
