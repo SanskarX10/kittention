@@ -1,3 +1,15 @@
+"""
+    ╱|、
+    (˚ˎ 。7  
+    |、˜〵          
+    じしˍ,)ノ
+
+    kittention is made out of love, not for production usage 
+"""
+
+
+
+
 import numpy as np
 from sentence_transformers import SentenceTransformer
 
@@ -19,9 +31,19 @@ def softmax(vec):
     sum_exp = np.sum(vec, axis=-1, keepdims=True)
     return vec / sum_exp
 
+def ReLU(x):
+    return np.maximum(0,x)
+
+def logsumexp(x, axis=None, keepdims=False):
+    x = np.asarray(x)
+    m = np.max(x, axis=axis, keepdims=True)
+    y = m + np.log(np.sum(np.exp(x - m), axis=axis, keepdims=True))
+    return y if keepdims else np.squeeze(y, axis=axis)
 
 
-class Attn:
+
+
+class Kittention:
     def __init__(self, x=None, d_k=None):
         self.x = x
         self.d_k = d_k
@@ -120,7 +142,7 @@ class Attn:
                 for j in range(len(mask[0])):
                     if j <= i and ((j >= i - local_window) or (j % stride == 0)):
                         cond1, cond2, cond3 =str(j <= i), str(j >= i - local_window), str(j % stride == 0)
-                        print(f"given i = {i}, j = {j} ; and j < = i {cond1} with j > = i - local_window {cond2} or j % stride is {cond3}") # debug statement
+                        print(f"given i = {i}, j = {j} ; and j < = i {cond1} with j > = i - local_window {cond2} or j % stride is {cond3}")
                         mask[i, j] = 0
                     else:
                         mask[i,j] = -1e9
@@ -175,10 +197,78 @@ class Attn:
         scores = np.matmul(scores, W_O)
         print("shape of scores: ", np.shape(scores))
         return scores
+    
+    def sparsesinkhornattn(self, x, n_heads, block_size, n_sinkhorn_iters=5, temperature=1.0, use_gumbel=True, sortcut_k=None):
+
+        cxt_len = seq_len(x)
+        emb_vec = embed(x)  # input -> embd_vec
+        n_blocks = cxt_len // block_size
+
+        W_Q = np.random.rand(len(emb_vec[0]), n_heads * self.d_k)  # embed_dim , n_heads * dk
+        W_K = np.random.rand(len(emb_vec[0]), n_heads * self.d_k)
+        W_V = np.random.rand(len(emb_vec[0]), n_heads * self.d_k)
+        W_O = np.random.rand(n_heads * self.d_k, len(emb_vec[0]))
+
+        # (cxt_len, n_heads * dk) -> (cxt_len, n_heads, dk) -> (n_blocks, block_size, n_heads, dk) -> (n_heads, n_blocks, block_size, dk)
+        Q = np.matmul(emb_vec, W_Q).reshape(cxt_len, n_heads, self.d_k).reshape(n_blocks, block_size, n_heads, self.d_k).transpose(2,0,1,3)
+        K = np.matmul(emb_vec, W_K).reshape(cxt_len, n_heads, self.d_k).reshape(n_blocks, block_size, n_heads, self.d_k).transpose(2,0,1,3)
+        V = np.matmul(emb_vec, W_V).reshape(cxt_len, n_heads, self.d_k).reshape(n_blocks, block_size, n_heads, self.d_k).transpose(2,0,1,3)
 
 
-attn = Attn(d_k=64)
-scos = attn.groupedqueryattn("the cat is also called a neko chan", n_heads=8, n_groups=2)
+        # step 2: create SORTNET
+        all_heads = []
+        for h in range(n_heads):
+            block_summary_k = np.sum(K[h], axis=1)
+
+            hidden_dim = 64
+            W1 = np.random.rand(self.d_k, hidden_dim)
+            b1 = np.random.rand(hidden_dim)
+            W2 = np.random.rand(hidden_dim, n_blocks)
+            b2 = np.random.rand(n_blocks)
+
+            h1 = ReLU(np.matmul(block_summary_k, W1) + b1) 
+            log_alpha = np.matmul(h1, W2) + b2
+
+            if use_gumbel: 
+                gumbel = -np.log(-np.log(np.random.uniform(size=log_alpha.shape) + 1e-10) + 1e-10)
+                log_alpha = (log_alpha + gumbel) / temperature
+            
+            # step 3: sinkhorn normalization (matrix becomes doubly stocastic)
+            log_P = log_alpha
+
+            for _ in range(n_sinkhorn_iters):
+                log_P = log_P - logsumexp(log_P, axis = 1, keepdims=True)
+                log_P = log_P - logsumexp(log_P, axis = 0, keepdims=True)
+            P = np.exp(log_P)
+
+            print("all rows should sum to 1: " + str(np.sum(P, axis=0))) 
+            print("all cols should sum to 1: " + str(np.sum(P, axis=1))) 
+
+
+            # step 4: permutation matrix
+            # first flatten K and V (n blocks, block_size * dk) then matmul then back to (n_blocks, block_size, dk)
+            K_sorted = np.matmul(P,K[h].reshape(n_blocks, -1)).reshape(n_blocks, block_size, self.d_k)
+            V_sorted = np.matmul(P, V[h].reshape(n_blocks, -1)).reshape(n_blocks, block_size, self.d_k)
+
+            output_blocks = []
+            for i in range(n_blocks):
+                scores = np.matmul(Q[h][i], K_sorted[i].T) 
+                scores /= np.sqrt(self.d_k)
+                scores = softmax(scores)
+                out = np.matmul(scores, V_sorted[i])  # (block_size, dk)
+                output_blocks.append(out)
+            head_score = np.concatenate(output_blocks, axis=0)
+            all_heads.append(head_score)
+        
+        scores = np.concatenate(all_heads, axis = 1)
+        scores = np.matmul(scores, W_O)
+        print("shape of scores: ", np.shape(scores))
+        return scores
+
+
+
+attn = Kittention(d_k=64)
+scos = attn.sparsesinkhornattn("the cat is also called a neko chan", n_heads=1, block_size=2)
 print(scos)
 
 
@@ -188,6 +278,8 @@ print(scos)
    
     def linearattn(self):
         pass
+
+
 
     def multiqueryattn(self):
         pass
