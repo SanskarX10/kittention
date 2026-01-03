@@ -30,7 +30,7 @@ Implementation status:
 | Grouped Query Attention | https://arxiv.org/abs/2305.13245 | ✅ |
 | Linear Attention | (tba) | ⏳ |
 | Multi-Head Latent Attention | https://arxiv.org/abs/2405.04434 | ⏳ |
-| Sparse Sinkhorn Attention | https://arxiv.org/pdf/2002.11296 | ⏳ |
+| Sparse Sinkhorn Attention | https://arxiv.org/pdf/2002.11296 | ✅ |
 
 
 
