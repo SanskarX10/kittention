@@ -31,7 +31,7 @@ Implementation status:
 | Linear Attention | (tba) | ⏳ |
 | Multi-Head Latent Attention | https://arxiv.org/abs/2405.04434 | ⏳ |
 | Sparse Sinkhorn Attention | https://arxiv.org/pdf/2002.11296 | ✅ |
-| Spark Attention | https://arxiv.org/pdf/2506.06644 | ⏳ |
+| Spark Attention | https://arxiv.org/pdf/2506.06644 | ✅ |
 
 
 
