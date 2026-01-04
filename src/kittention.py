@@ -8,11 +8,10 @@
 """
 
 
-
-
 import numpy as np
+import scipy as sp
 from sentence_transformers import SentenceTransformer
-
+from utils import seq_len, softmax, softplus, ReLU, logsumexp, gaussian_ppf
 
 
 np.random.seed(42)
@@ -21,26 +20,6 @@ model = SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')
 def embed(text):
     emb_vec = np.array([model.encode(token) for token in text.split(" ")])
     return emb_vec                                    # (num_words , embed dim)
-
-def seq_len(text):
-    return len(text.split(" "))
-
-def softmax(vec):
-    vec = vec - np.max(vec, axis=-1, keepdims=True)
-    vec = np.exp(vec)
-    sum_exp = np.sum(vec, axis=-1, keepdims=True)
-    return vec / sum_exp
-
-def ReLU(x):
-    return np.maximum(0,x)
-
-def logsumexp(x, axis=None, keepdims=False):
-    x = np.asarray(x)
-    m = np.max(x, axis=axis, keepdims=True)
-    y = m + np.log(np.sum(np.exp(x - m), axis=axis, keepdims=True))
-    return y if keepdims else np.squeeze(y, axis=axis)
-
-
 
 
 class Kittention:
@@ -199,6 +178,7 @@ class Kittention:
         return scores
     
     def sparsesinkhornattn(self, x, n_heads, block_size, n_sinkhorn_iters=5, temperature=1.0, use_gumbel=True, sortcut_k=None):
+        """https://arxiv.org/pdf/2002.11296"""
 
         cxt_len = seq_len(x)
         emb_vec = embed(x)  # input -> embd_vec
@@ -264,30 +244,88 @@ class Kittention:
         scores = np.matmul(scores, W_O)
         print("shape of scores: ", np.shape(scores))
         return scores
+    
+    def sparkattention(self, x, n_heads, k_attn, r=None, use_rope=False):
+        """https://arxiv.org/pdf/2506.06644"""
+
+        cxt_len = seq_len(x)
+        emb_vec = embed(x)                            # input -> embd_vec
+
+        print("cxt_len: ", cxt_len)
+        print("embed vec len: ", np.shape(emb_vec))
+
+        W_Q = np.random.rand(len(emb_vec[0]), n_heads * self.d_k) # embed_dim , n_heads * dk
+        W_K = np.random.rand(len(emb_vec[0]), n_heads * self.d_k)
+        W_V = np.random.rand(len(emb_vec[0]), n_heads * self.d_k)
+        W_O = np.random.rand(n_heads * self.d_k, len(emb_vec[0]))
+
+        print("weight mat shape: ", np.shape(W_Q))
+
+        Q = np.matmul(emb_vec, W_Q).reshape(cxt_len, n_heads, self.d_k).transpose(1,0,2)   # num_words, embed_dim x embed dim, n_heads * dk -> num_words, n_heads * dk
+        K = np.matmul(emb_vec, W_K).reshape(cxt_len, n_heads, self.d_k).transpose(1,0,2)
+        V = np.matmul(emb_vec, W_V).reshape(cxt_len, n_heads, self.d_k).transpose(1,0,2)
+        print("shape of query vec: ", np.shape(Q))    # n_heads, num_words, dk
+
+        if r is None: r = self.d_k // 2
+
+        # step1: key splitting
+        all_heads = []
+        for h in range(n_heads):
+
+            word_scores = []
+            K1 = np.transpose(K[h][:,:r])  # (num_words , dk) -> (num_words, r) -> (r, num_words)
+            K2 = np.transpose(K[h][:,r:]) # (d_k - r, num_words)
+            print("shape of K1 : ", np.shape(K1)) 
+            print("shape of K2 : ", np.shape(K2)) 
+            V_h = np.transpose(V[h])
+
+            for i in range(cxt_len):
+                q1 = Q[h, i, :r] # (r) for i
+                q2 = Q[h, i, r:] # (d_k - r) for i
+              
+                # step2: predictor scores
+                casual_K1 = K1[:, :i+1]
+                score_pred = np.matmul(q1, casual_K1) # (num_words,)
+                
+                # step3: topk selection
+                mu = np.mean(score_pred)
+                sigma = np.std(score_pred)
+                p = 1.0 - (k_attn / len(score_pred))
+                z = gaussian_ppf(p)
+                θ = mu + sigma * z
+
+                keep = score_pred > θ
+                idx = np.where(keep)[0]
+                if len(idx) == 0: idx = np.array([len(score_pred)-1])
+    
+                # step4: sparse softmax for predictor scores
+                score_pred_select = score_pred[idx]
+                a_idx = softmax(score_pred_select) # predictor attn weights
+
+                # step5: complute value scores for selected tokens
+                casual_K2 = K2[:, :i+1]
+                score_value = np.array([np.matmul(q2, casual_K2[:,j]) for j in idx])
+                b_idx = softplus(score_value)
+                
+                w_idx = np.multiply(a_idx, b_idx)
+
+                casual_V = V_h[:, :i+1]
+                output = np.sum(w_idx[:, None] * np.transpose(casual_V[:, idx]), axis=0)
+                word_scores.append(output)
+        
+            head_output = np.stack(word_scores, axis=0)
+            all_heads.append(head_output)
+        
+        scores = np.concatenate(all_heads, axis=1)  # (num_words, n_heads*d_k)
+        scores = np.matmul(scores, W_O)              # (num_words, embed_dim)
+        print("shape of scores: ", np.shape(scores))
+        return scores
 
 
 
 attn = Kittention(d_k=64)
-scos = attn.sparsesinkhornattn("the cat is also called a neko chan", n_heads=1, block_size=2)
+scos = attn.sparkattention("the cat is also called a neko chan", n_heads=1, k_attn=3, r=None, use_rope=False)
 print(scos)
 
-
-
-"""
-
-   
-    def linearattn(self):
-        pass
-
-
-
-    def multiqueryattn(self):
-        pass
-
-    def multiheadlatentattn(self):
-        pass
-
-
-"""
 
 
