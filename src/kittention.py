@@ -11,7 +11,7 @@
 import numpy as np
 import scipy as sp
 from sentence_transformers import SentenceTransformer
-from utils import seq_len, softmax, softplus, ReLU, logsumexp, gaussian_ppf
+from utils import seq_len, softmax, softplus, ReLU, logsumexp, gaussian_ppf, short_conv1d, swish, l2_normalize, sigmoid, rms_norm
 
 
 np.random.seed(42)
@@ -245,7 +245,7 @@ class Kittention:
         print("shape of scores: ", np.shape(scores))
         return scores
     
-    def sparkattention(self, x, n_heads, k_attn, r=None, use_rope=False):
+    def sparkattn(self, x, n_heads, k_attn, r=None, use_rope=False):
         """https://arxiv.org/pdf/2506.06644"""
 
         cxt_len = seq_len(x)
@@ -320,12 +320,102 @@ class Kittention:
         scores = np.matmul(scores, W_O)              # (num_words, embed_dim)
         print("shape of scores: ", np.shape(scores))
         return scores
+    
+    def kimideltaattn(self, x, n_heads, use_short_conv=True, allow_neg_eigval=False):
 
+        emb_vec = embed(x)                  # num words, embed_dim
+        cxt_len = seq_len(x)                # num words
+
+        self.d_v = self.d_k
+        W_Q = np.random.rand(len(emb_vec[0]),n_heads * self.d_k) # embed_dim, n_heads * dk
+        W_K = np.random.rand(len(emb_vec[0]),n_heads * self.d_k) 
+        W_V = np.random.rand(len(emb_vec[0]),n_heads * self.d_v) 
+        W_O = np.random.rand(n_heads * self.d_k, len(emb_vec[0]))
+
+        gate_rank = self.d_k
+        W_gdown = np.random.rand(len(emb_vec[0]), gate_rank)
+        W_gup = np.random.rand(gate_rank, n_heads * self.d_k)
+        W_beta = np.random.rand(len(emb_vec[0]), n_heads)
+
+        # learnable parameters for decay
+        A_log = np.log(np.random.uniform(1,16, size=(n_heads, self.d_k)))
+        print("shape of A_log :" + str(np.shape(A_log)))
+        dt_bias = np.zeros((n_heads, self.d_k))
+
+        Q = np.matmul(emb_vec, W_Q)
+        K = np.matmul(emb_vec, W_K)
+        V = np.matmul(emb_vec, W_V)
+
+        print("shape of Q :" + str(np.shape(Q)))
+
+        if use_short_conv:
+            Q = short_conv1d(Q, kernel_size=4)
+            K = short_conv1d(K, kernel_size=4)
+            V = short_conv1d(V, kernel_size=4)
+            print("shape of Q_conv (1d) :" + str(np.shape(Q)))
+        
+        Q, K, V = swish(Q), swish(K), swish(V)
+        Q, K = l2_normalize(Q, axis=-1), l2_normalize(K,axis=-1)
+        Q, K, V = Q.reshape(cxt_len, n_heads, self.d_k).transpose(1,0,2), K.reshape(cxt_len, n_heads, self.d_k).transpose(1,0,2), V.reshape(cxt_len, n_heads, self.d_k).transpose(1,0,2)
+        print("shape of final Q before score calc: " + str(np.shape(Q)))
+
+        # compute gates:
+        g = np.matmul(emb_vec, np.matmul(W_gdown, W_gup)).reshape(cxt_len, n_heads, self.d_k).transpose(1,0,2) # (num_words, n_heads * d_k)
+
+        # convert g to decay , mamba style
+        A = np.exp(A_log)
+        dt = softplus(g + dt_bias[:, None,:])
+        alpha = np.exp(-A[:, None,:] * dt)
+        print("shape of decay : " + str(np.shape(alpha)))
+
+        # scalar learning rate
+        beta = np.transpose(sigmoid(np.matmul(emb_vec, W_beta))) # n_heads , n_words
+        if allow_neg_eigval: beta = beta * 2.0
+
+        all_heads = []
+        for h in range(n_heads):
+
+            S = np.zeros((self.d_k, self.d_v)) # dk, dv
+            print(f"shape of state matrix for head {h+1}: " + str(S.shape))
+
+            outputs = []
+            for t in range(cxt_len):
+                q_t = Q[h, t]
+                k_t = K[h, t]
+                v_t = V[h, t]
+                alpha_t = alpha[h, t]
+                beta_t = beta[h, t]
+
+                S_decayed = alpha_t[:,None] * S # dk, dv
+
+                # householder step (https://www.cs.cornell.edu/~bindel/class/cs6210-f12/notes/lec16.pdf, https://www.youtube.com/watch?v=6TIVIw4B5VA)
+                k_t_proj = np.matmul(k_t, S_decayed)
+                S_House = S_decayed - beta_t * np.outer(k_t, k_t_proj) # dk, dv
+
+                S = S_House + beta_t * np.outer(k_t, v_t)
+
+                # query the state
+                o_t = np.matmul(np.transpose(S), q_t) # dv
+                outputs.append(o_t)
+            
+            head_score = np.stack(outputs, axis=0) # num_words, dv
+            all_heads.append(head_score)
+        
+        concat = np.concatenate(all_heads, axis = -1) # num_words, n_heads * d_v
+
+        W_gdown_output = np.random.rand(len(emb_vec[0]), gate_rank)
+        W_gup_output = np.random.rand(gate_rank, n_heads * self.d_v)
+        gate = sigmoid(np.matmul(emb_vec, np.matmul(W_gdown_output, W_gup_output)))  # num_words, n_heads * d_v
+        print("shape of output gate: " + str(gate.shape))
+
+        concat = rms_norm(concat.reshape(cxt_len, n_heads, self.d_v))
+        concat = concat.reshape(cxt_len, n_heads * self.d_v)
+        gated_op = gate * concat
+        scores = np.matmul(gated_op, W_O)
+        print("shape of scores: ", np.shape(scores))
+        return scores
 
 
 attn = Kittention(d_k=64)
-scos = attn.sparkattention("the cat is also called a neko chan", n_heads=1, k_attn=3, r=None, use_rope=False)
+scos = attn.kimideltaattn("the cat is also called a neko chan", n_heads=2)
 print(scos)
-
-
-
